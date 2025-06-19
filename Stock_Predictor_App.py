@@ -363,7 +363,7 @@ def main():
         end_date = st.date_input("End Date", value=datetime.now())
         
         window_size = st.slider("Window Size", 30, 90, 60)
-        epochs = st.slider("Training Epochs", 10, 50, 20)
+        epochs = st.slider("Training Epochs", 10, 50, 10)
         
         run_analysis = st.button("🚀 Run Analysis", type="primary")
     
