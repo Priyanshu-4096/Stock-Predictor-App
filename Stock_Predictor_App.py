@@ -4,14 +4,27 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
 import matplotlib.pyplot as plt
-import ta
 from datetime import datetime, timedelta
 import warnings
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+# Try importing TensorFlow and ta, with fallbacks
+try:
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_AVAILABLE = False
+    st.error("TensorFlow not available. Please check your requirements.txt")
+
+try:
+    import ta
+    TA_AVAILABLE = True
+except ImportError:
+    TA_AVAILABLE = False
+    st.warning("Technical Analysis library not available. Some features may be limited.")
 
 warnings.filterwarnings('ignore')
 
@@ -44,15 +57,31 @@ def load_data(ticker, start_date, end_date):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
         
-        # Add technical indicators
+        # Add basic technical indicators
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['MA50'] = df['Close'].rolling(window=50).mean()
-        df['RSI'] = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
         
-        # MACD
-        macd = ta.trend.MACD(close=df['Close'])
-        df['MACD'] = macd.macd()
-        df['MACD_signal'] = macd.macd_signal()
+        # Add technical indicators if ta is available
+        if TA_AVAILABLE:
+            df['RSI'] = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
+            
+            # MACD
+            macd = ta.trend.MACD(close=df['Close'])
+            df['MACD'] = macd.macd()
+            df['MACD_signal'] = macd.macd_signal()
+        else:
+            # Simple RSI calculation
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df['RSI'] = 100 - (100 / (1 + rs))
+            
+            # Simple MACD calculation
+            exp1 = df['Close'].ewm(span=12).mean()
+            exp2 = df['Close'].ewm(span=26).mean()
+            df['MACD'] = exp1 - exp2
+            df['MACD_signal'] = df['MACD'].ewm(span=9).mean()
         
         # Price change
         df['Returns'] = df['Close'].pct_change()
@@ -65,89 +94,106 @@ def load_data(ticker, start_date, end_date):
 
 @st.cache_data
 def build_and_train_model(df, window_size, epochs):
-    """Build and train LSTM model - Fixed version"""
-    # Use only Close price for prediction to avoid scaling issues
-    data = df[['Close']].values
+    """Build and train LSTM model"""
+    if not TENSORFLOW_AVAILABLE:
+        st.error("TensorFlow is required for model training")
+        return None, None, None, None, None, None
     
-    # Scale data
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data)
+    try:
+        # Use only Close price for prediction
+        data = df[['Close']].values
+        
+        # Scale data
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(data)
+        
+        def create_sequences(data, window):
+            X, y = [], []
+            for i in range(window, len(data)):
+                X.append(data[i-window:i, 0])
+                y.append(data[i, 0])
+            return np.array(X), np.array(y)
+        
+        X, y = create_sequences(scaled_data, window_size)
+        
+        if len(X) == 0:
+            st.error("Insufficient data for model training")
+            return None, None, None, None, None, None
+        
+        # Reshape for LSTM
+        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+        
+        # Split data
+        split = int(len(X) * 0.8)
+        X_train, X_test = X[:split], X[split:]
+        y_train, y_test = y[:split], y[split:]
+        
+        # Build model
+        model = Sequential([
+            LSTM(50, return_sequences=True, input_shape=(window_size, 1)),
+            Dropout(0.2),
+            LSTM(50, return_sequences=False),
+            Dropout(0.2),
+            Dense(25),
+            Dense(1)
+        ])
+        
+        model.compile(optimizer='adam', loss='mean_squared_error')
+        
+        # Train model
+        with st.spinner('Training model...'):
+            model.fit(X_train, y_train, batch_size=32, epochs=epochs, verbose=0)
+        
+        # Make predictions
+        predictions = model.predict(X_test)
+        
+        # Inverse transform predictions
+        predictions = scaler.inverse_transform(predictions)
+        y_test_actual = scaler.inverse_transform(y_test.reshape(-1, 1))
+        
+        # Calculate metrics
+        rmse = np.sqrt(mean_squared_error(y_test_actual, predictions))
+        mae = mean_absolute_error(y_test_actual, predictions)
+        mape = np.mean(np.abs((y_test_actual - predictions) / y_test_actual)) * 100
+        
+        # Predict next price
+        last_sequence = scaled_data[-window_size:]
+        last_sequence = np.reshape(last_sequence, (1, window_size, 1))
+        next_price_scaled = model.predict(last_sequence)
+        next_price = scaler.inverse_transform(next_price_scaled)[0, 0]
+        
+        return y_test_actual.flatten(), predictions.flatten(), next_price, rmse, mae, mape
     
-    def create_sequences(data, window):
-        X, y = [], []
-        for i in range(window, len(data)):
-            X.append(data[i-window:i, 0])  # Use only close price
-            y.append(data[i, 0])
-        return np.array(X), np.array(y)
-    
-    X, y = create_sequences(scaled_data, window_size)
-    
-    # Reshape for LSTM
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    
-    # Split data
-    split = int(len(X) * 0.8)
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
-    
-    # Build simpler, more stable model
-    model = Sequential([
-        LSTM(50, return_sequences=True, input_shape=(window_size, 1)),
-        Dropout(0.2),
-        LSTM(50, return_sequences=False),
-        Dropout(0.2),
-        Dense(25),
-        Dense(1)
-    ])
-    
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    
-    # Train model
-    with st.spinner('Training model...'):
-        model.fit(X_train, y_train, batch_size=32, epochs=epochs, verbose=0)
-    
-    # Make predictions
-    predictions = model.predict(X_test)
-    
-    # Inverse transform predictions
-    predictions = scaler.inverse_transform(predictions)
-    y_test_actual = scaler.inverse_transform(y_test.reshape(-1, 1))
-    
-    # Calculate metrics
-    rmse = np.sqrt(mean_squared_error(y_test_actual, predictions))
-    mae = mean_absolute_error(y_test_actual, predictions)
-    mape = np.mean(np.abs((y_test_actual - predictions) / y_test_actual)) * 100
-    
-    # Predict next price
-    last_sequence = scaled_data[-window_size:]
-    last_sequence = np.reshape(last_sequence, (1, window_size, 1))
-    next_price_scaled = model.predict(last_sequence)
-    next_price = scaler.inverse_transform(next_price_scaled)[0, 0]
-    
-    return y_test_actual.flatten(), predictions.flatten(), next_price, rmse, mae, mape
+    except Exception as e:
+        st.error(f"Error in model training: {str(e)}")
+        return None, None, None, None, None, None
 
 def calculate_stock_score(df, next_price, current_price, mape):
     """Calculate stock score"""
-    expected_return = ((next_price - current_price) / current_price) * 100
-    
-    # Technical indicators
-    rsi = df['RSI'].iloc[-1]
-    
-    # Score components
-    prediction_score = min(max(expected_return * 10, -50), 50)  # Cap at ±50
-    rsi_score = 100 - abs(rsi - 50) * 2  # Closer to 50 is better
-    accuracy_score = max(100 - mape, 0)
-    
-    total_score = (prediction_score * 0.5 + rsi_score * 0.3 + accuracy_score * 0.2)
-    
-    return {
-        'total_score': total_score,
-        'expected_return': expected_return,
-        'current_price': current_price,
-        'predicted_price': next_price,
-        'rsi': rsi,
-        'accuracy': accuracy_score
-    }
+    try:
+        expected_return = ((next_price - current_price) / current_price) * 100
+        
+        # Technical indicators
+        rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
+        
+        # Score components
+        prediction_score = min(max(expected_return * 10, -50), 50)
+        rsi_score = 100 - abs(rsi - 50) * 2
+        accuracy_score = max(100 - mape, 0)
+        
+        total_score = (prediction_score * 0.5 + rsi_score * 0.3 + accuracy_score * 0.2)
+        
+        return {
+            'total_score': total_score,
+            'expected_return': expected_return,
+            'current_price': current_price,
+            'predicted_price': next_price,
+            'rsi': rsi,
+            'accuracy': accuracy_score
+        }
+    except Exception as e:
+        st.error(f"Error calculating stock score: {str(e)}")
+        return None
 
 def add_watermark(fig):
     """Add watermark to plot"""
@@ -175,19 +221,21 @@ def create_chart(df, ticker):
         line=dict(color='blue', width=2)
     ))
     
-    fig.add_trace(go.Scatter(
-        x=df.index, 
-        y=df['MA20'], 
-        name='MA20',
-        line=dict(color='orange', width=1)
-    ))
+    if 'MA20' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index, 
+            y=df['MA20'], 
+            name='MA20',
+            line=dict(color='orange', width=1)
+        ))
     
-    fig.add_trace(go.Scatter(
-        x=df.index, 
-        y=df['MA50'], 
-        name='MA50',
-        line=dict(color='green', width=1)
-    ))
+    if 'MA50' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index, 
+            y=df['MA50'], 
+            name='MA50',
+            line=dict(color='green', width=1)
+        ))
     
     company_name = COMPANY_NAMES.get(ticker, ticker)
     fig.update_layout(
@@ -197,9 +245,7 @@ def create_chart(df, ticker):
         height=400
     )
     
-    # Add watermark
     fig = add_watermark(fig)
-    
     return fig
 
 def create_volume_chart(df, ticker):
@@ -235,16 +281,13 @@ def create_volume_chart(df, ticker):
         height=400
     )
     
-    # Add watermark
     fig = add_watermark(fig)
-    
     return fig
 
 def create_rsi_macd_chart(df, ticker):
     """Create combined RSI and MACD chart"""
     company_name = COMPANY_NAMES.get(ticker, ticker)
     
-    # Create subplots
     fig = make_subplots(
         rows=2, cols=1,
         subplot_titles=['RSI', 'MACD'],
@@ -253,48 +296,48 @@ def create_rsi_macd_chart(df, ticker):
     )
     
     # RSI plot
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df['RSI'],
-        name='RSI',
-        line=dict(color='purple', width=2)
-    ), row=1, col=1)
-    
-    # RSI overbought/oversold lines
-    fig.add_hline(y=70, line_dash="dash", line_color="red", 
-                  annotation_text="Overbought (70)", row=1, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", 
-                  annotation_text="Oversold (30)", row=1, col=1)
-    fig.add_hline(y=50, line_dash="dot", line_color="gray", row=1, col=1)
+    if 'RSI' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['RSI'],
+            name='RSI',
+            line=dict(color='purple', width=2)
+        ), row=1, col=1)
+        
+        # RSI levels
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=1, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=1, col=1)
+        fig.add_hline(y=50, line_dash="dot", line_color="gray", row=1, col=1)
     
     # MACD plot
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df['MACD'],
-        name='MACD Line',
-        line=dict(color='blue', width=2)
-    ), row=2, col=1)
-    
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df['MACD_signal'],
-        name='Signal Line',
-        line=dict(color='red', width=1)
-    ), row=2, col=1)
-    
-    # MACD histogram
-    macd_histogram = df['MACD'] - df['MACD_signal']
-    colors = ['green' if val > 0 else 'red' for val in macd_histogram]
-    fig.add_trace(go.Bar(
-        x=df.index,
-        y=macd_histogram,
-        name='MACD Histogram',
-        marker_color=colors,
-        opacity=0.5
-    ), row=2, col=1)
+    if 'MACD' in df.columns and 'MACD_signal' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['MACD'],
+            name='MACD Line',
+            line=dict(color='blue', width=2)
+        ), row=2, col=1)
+        
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['MACD_signal'],
+            name='Signal Line',
+            line=dict(color='red', width=1)
+        ), row=2, col=1)
+        
+        # MACD histogram
+        macd_histogram = df['MACD'] - df['MACD_signal']
+        colors = ['green' if val > 0 else 'red' for val in macd_histogram]
+        fig.add_trace(go.Bar(
+            x=df.index,
+            y=macd_histogram,
+            name='MACD Histogram',
+            marker_color=colors,
+            opacity=0.5
+        ), row=2, col=1)
     
     fig.update_layout(
-        title=f'{company_name} Technical Indicators (RSI & MACD)',
+        title=f'{company_name} Technical Indicators',
         height=400,
         showlegend=True
     )
@@ -303,9 +346,7 @@ def create_rsi_macd_chart(df, ticker):
     fig.update_yaxes(title_text="MACD", row=2, col=1)
     fig.update_xaxes(title_text="Date", row=2, col=1)
     
-    # Add watermark
     fig = add_watermark(fig)
-    
     return fig
 
 def create_prediction_chart(actual, predicted, ticker):
@@ -332,21 +373,21 @@ def create_prediction_chart(actual, predicted, ticker):
         height=400
     )
     
-    # Add watermark
     fig = add_watermark(fig)
-    
     return fig
 
 def main():
     st.title("📈 Stock Prediction Dashboard")
-    #st.markdown("**LSTM-based Stock Price Prediction by Priyanshu Joarder**")
     st.markdown("""
-<div style='display: flex; justify-content: space-between;'>
-    <strong>LSTM-based Stock Prediction App</strong>
-    <strong>by Priyanshu Joarder</strong>
-</div>
-""", unsafe_allow_html=True)
-
+    <div style='display: flex; justify-content: space-between;'>
+        <strong>LSTM-based Stock Prediction App</strong>
+        <strong>by Priyanshu Joarder</strong>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if not TENSORFLOW_AVAILABLE:
+        st.error("⚠️ TensorFlow is not available. Please check your deployment configuration.")
+        st.stop()
     
     # Sidebar
     with st.sidebar:
@@ -363,7 +404,7 @@ def main():
         end_date = st.date_input("End Date", value=datetime.now())
         
         window_size = st.slider("Window Size", 30, 90, 60)
-        epochs = st.slider("Training Epochs", 10, 50, 10)
+        epochs = st.slider("Training Epochs", 10, 50, 20)
         
         run_analysis = st.button("🚀 Run Analysis", type="primary")
     
@@ -388,10 +429,11 @@ def main():
             
             try:
                 # Train model
-                actual, predicted, next_price, rmse, mae, mape = build_and_train_model(
-                    df, window_size, epochs
-                )
+                model_result = build_and_train_model(df, window_size, epochs)
+                if model_result[0] is None:
+                    continue
                 
+                actual, predicted, next_price, rmse, mae, mape = model_result
                 current_price = df['Close'].iloc[-1]
                 
                 results[ticker] = {
@@ -406,9 +448,9 @@ def main():
                 }
                 
                 # Calculate score
-                stock_scores[ticker] = calculate_stock_score(
-                    df, next_price, current_price, mape
-                )
+                score_result = calculate_stock_score(df, next_price, current_price, mape)
+                if score_result:
+                    stock_scores[ticker] = score_result
                 
             except Exception as e:
                 st.error(f"Error analyzing {company_name}: {str(e)}")
@@ -424,9 +466,9 @@ def main():
         st.header("📊 Analysis Results")
         
         # Best stock recommendation
-        sorted_stocks = sorted(stock_scores.items(), key=lambda x: x[1]['total_score'], reverse=True)
-        
-        if sorted_stocks:
+        if stock_scores:
+            sorted_stocks = sorted(stock_scores.items(), key=lambda x: x[1]['total_score'], reverse=True)
+            
             best_stock = sorted_stocks[0]
             best_ticker = best_stock[0]
             best_company = COMPANY_NAMES.get(best_ticker, best_ticker)
@@ -460,22 +502,22 @@ def main():
                 st.metric("Model Accuracy", f"{results[best_ticker]['mape']:.1f}% MAPE")
             
             st.warning("⚠️ **Disclaimer**: AI-generated recommendation. Always do your own research!")
-        
-        # Comparison table
-        st.subheader("Stock Comparison")
-        comparison_data = []
-        for ticker, score_data in sorted_stocks:
-            company_name = COMPANY_NAMES.get(ticker, ticker)
-            comparison_data.append({
-                'Company': company_name,
-                'Score': f"{score_data['total_score']:.1f}",
-                'Expected Return (%)': f"{score_data['expected_return']:.2f}",
-                'Current Price ($)': f"{score_data['current_price']:.2f}",
-                'Target Price ($)': f"{score_data['predicted_price']:.2f}",
-                'MAPE (%)': f"{results[ticker]['mape']:.2f}"
-            })
-        
-        st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
+            
+            # Comparison table
+            st.subheader("Stock Comparison")
+            comparison_data = []
+            for ticker, score_data in sorted_stocks:
+                company_name = COMPANY_NAMES.get(ticker, ticker)
+                comparison_data.append({
+                    'Company': company_name,
+                    'Score': f"{score_data['total_score']:.1f}",
+                    'Expected Return (%)': f"{score_data['expected_return']:.2f}",
+                    'Current Price ($)': f"{score_data['current_price']:.2f}",
+                    'Target Price ($)': f"{score_data['predicted_price']:.2f}",
+                    'MAPE (%)': f"{results[ticker]['mape']:.2f}"
+                })
+            
+            st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
         
         # Individual analysis
         st.header("Detailed Analysis")
@@ -484,16 +526,14 @@ def main():
             company_name = COMPANY_NAMES.get(ticker, ticker)
             
             with st.expander(f"{company_name} Analysis", expanded=False):
-                # Price and prediction charts (same row)
+                # Charts
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    # Price chart
                     fig1 = create_chart(results[ticker]['df'], ticker)
                     st.plotly_chart(fig1, use_container_width=True)
                 
                 with col2:
-                    # Prediction chart
                     fig2 = create_prediction_chart(
                         results[ticker]['actual'], 
                         results[ticker]['predicted'], 
@@ -501,16 +541,13 @@ def main():
                     )
                     st.plotly_chart(fig2, use_container_width=True)
                 
-                # Volume and Technical indicators charts (same row)
                 col3, col4 = st.columns(2)
                 
                 with col3:
-                    # Volume analysis
                     fig3 = create_volume_chart(results[ticker]['df'], ticker)
                     st.plotly_chart(fig3, use_container_width=True)
                 
                 with col4:
-                    # RSI and MACD analysis (combined)
                     fig4 = create_rsi_macd_chart(results[ticker]['df'], ticker)
                     st.plotly_chart(fig4, use_container_width=True)
                 
@@ -526,4 +563,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
