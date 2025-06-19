@@ -2,564 +2,407 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-import warnings
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
-
-# Try importing TensorFlow and ta, with fallbacks
-try:
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    st.error("TensorFlow not available. Please check your requirements.txt")
-
-try:
-    import ta
-    TA_AVAILABLE = True
-except ImportError:
-    TA_AVAILABLE = False
-    st.warning("Technical Analysis library not available. Some features may be limited.")
+import seaborn as sns
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import warnings
+from datetime import datetime, timedelta
+import ta
 
 warnings.filterwarnings('ignore')
 
 # Set page config
 st.set_page_config(
-    page_title="Stock Prediction Dashboard",
+    page_title="Stock Price Predictor",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-COMPANY_NAMES = {
-    'AAPL': 'Apple Inc.',
-    'MSFT': 'Microsoft Corporation',
-    'GOOGL': 'Alphabet Inc.',
-    'AMZN': 'Amazon.com Inc.',
-    'TSLA': 'Tesla Inc.',
-    'META': 'Meta Platforms Inc.',
-    'NVDA': 'NVIDIA Corporation'
-}
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 3rem;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
+    .prediction-card {
+        background-color: #e8f4fd;
+        padding: 1.5rem;
+        border-radius: 0.5rem;
+        border-left: 5px solid #1f77b4;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_data
-def load_data(ticker, start_date, end_date):
-    """Load and preprocess stock data"""
+def get_stock_data(symbol, period="2y"):
+    """Fetch stock data from Yahoo Finance"""
     try:
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        
-        if df.empty:
-            return None
-        
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-        
-        # Add basic technical indicators
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA50'] = df['Close'].rolling(window=50).mean()
-        
-        # Add technical indicators if ta is available
-        if TA_AVAILABLE:
-            df['RSI'] = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
-            
-            # MACD
-            macd = ta.trend.MACD(close=df['Close'])
-            df['MACD'] = macd.macd()
-            df['MACD_signal'] = macd.macd_signal()
-        else:
-            # Simple RSI calculation
-            delta = df['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
-            
-            # Simple MACD calculation
-            exp1 = df['Close'].ewm(span=12).mean()
-            exp2 = df['Close'].ewm(span=26).mean()
-            df['MACD'] = exp1 - exp2
-            df['MACD_signal'] = df['MACD'].ewm(span=9).mean()
-        
-        # Price change
-        df['Returns'] = df['Close'].pct_change()
-        df['Volatility'] = df['Returns'].rolling(window=20).std()
-        
-        return df.dropna()
+        stock = yf.Ticker(symbol)
+        data = stock.history(period=period)
+        return data
     except Exception as e:
-        st.error(f"Error loading data for {ticker}: {str(e)}")
+        st.error(f"Error fetching data for {symbol}: {str(e)}")
         return None
 
-@st.cache_data
-def build_and_train_model(df, window_size, epochs):
-    """Build and train LSTM model"""
-    if not TENSORFLOW_AVAILABLE:
-        st.error("TensorFlow is required for model training")
-        return None, None, None, None, None, None
-    
+def add_technical_indicators(df):
+    """Add technical indicators to the dataframe"""
     try:
-        # Use only Close price for prediction
-        data = df[['Close']].values
+        # Moving Averages
+        df['MA_5'] = df['Close'].rolling(window=5).mean()
+        df['MA_10'] = df['Close'].rolling(window=10).mean()
+        df['MA_20'] = df['Close'].rolling(window=20).mean()
+        df['MA_50'] = df['Close'].rolling(window=50).mean()
         
-        # Scale data
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data = scaler.fit_transform(data)
+        # RSI
+        df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
         
-        def create_sequences(data, window):
-            X, y = [], []
-            for i in range(window, len(data)):
-                X.append(data[i-window:i, 0])
-                y.append(data[i, 0])
-            return np.array(X), np.array(y)
+        # MACD
+        macd = ta.trend.MACD(df['Close'])
+        df['MACD'] = macd.macd()
+        df['MACD_signal'] = macd.macd_signal()
         
-        X, y = create_sequences(scaled_data, window_size)
+        # Bollinger Bands
+        bollinger = ta.volatility.BollingerBands(df['Close'])
+        df['BB_upper'] = bollinger.bollinger_hband()
+        df['BB_lower'] = bollinger.bollinger_lband()
+        df['BB_middle'] = bollinger.bollinger_mavg()
         
-        if len(X) == 0:
-            st.error("Insufficient data for model training")
-            return None, None, None, None, None, None
+        # Volume indicators
+        df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
         
-        # Reshape for LSTM
-        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+        # Price features
+        df['High_Low_Pct'] = (df['High'] - df['Low']) / df['Close'] * 100
+        df['Price_Change'] = df['Close'].pct_change()
+        df['Volume_Change'] = df['Volume'].pct_change()
         
-        # Split data
-        split = int(len(X) * 0.8)
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
-        
-        # Build model
-        model = Sequential([
-            LSTM(50, return_sequences=True, input_shape=(window_size, 1)),
-            Dropout(0.2),
-            LSTM(50, return_sequences=False),
-            Dropout(0.2),
-            Dense(25),
-            Dense(1)
-        ])
-        
-        model.compile(optimizer='adam', loss='mean_squared_error')
-        
+        return df
+    except Exception as e:
+        st.error(f"Error adding technical indicators: {str(e)}")
+        return df
+
+def prepare_features(df, lookback_days=30):
+    """Prepare features for machine learning"""
+    # Add technical indicators
+    df = add_technical_indicators(df)
+    
+    # Create lagged features
+    feature_columns = ['Close', 'Volume', 'MA_5', 'MA_10', 'MA_20', 'RSI', 'MACD', 'High_Low_Pct']
+    
+    for col in feature_columns:
+        if col in df.columns:
+            for i in range(1, lookback_days + 1):
+                df[f'{col}_lag_{i}'] = df[col].shift(i)
+    
+    # Drop rows with NaN values
+    df = df.dropna()
+    
+    return df
+
+def create_ml_features(df):
+    """Create features for machine learning models"""
+    feature_cols = [col for col in df.columns if 
+                   col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Dividends', 'Stock Splits']
+                   and not col.startswith('BB_')]
+    
+    # If no lag features, create some basic ones
+    if not any('lag' in col for col in feature_cols):
+        df['Close_lag_1'] = df['Close'].shift(1)
+        df['Close_lag_2'] = df['Close'].shift(2)
+        df['Close_lag_3'] = df['Close'].shift(3)
+        df['Volume_lag_1'] = df['Volume'].shift(1)
+        feature_cols.extend(['Close_lag_1', 'Close_lag_2', 'Close_lag_3', 'Volume_lag_1'])
+    
+    return df[feature_cols].dropna(), df['Close'][df[feature_cols].dropna().index]
+
+def train_models(X, y):
+    """Train multiple ML models"""
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    models = {
+        'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
+        'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, random_state=42),
+        'Linear Regression': LinearRegression()
+    }
+    
+    results = {}
+    
+    for name, model in models.items():
         # Train model
-        with st.spinner('Training model...'):
-            model.fit(X_train, y_train, batch_size=32, epochs=epochs, verbose=0)
+        model.fit(X_train_scaled, y_train)
         
         # Make predictions
-        predictions = model.predict(X_test)
-        
-        # Inverse transform predictions
-        predictions = scaler.inverse_transform(predictions)
-        y_test_actual = scaler.inverse_transform(y_test.reshape(-1, 1))
+        y_pred = model.predict(X_test_scaled)
         
         # Calculate metrics
-        rmse = np.sqrt(mean_squared_error(y_test_actual, predictions))
-        mae = mean_absolute_error(y_test_actual, predictions)
-        mape = np.mean(np.abs((y_test_actual - predictions) / y_test_actual)) * 100
+        mse = mean_squared_error(y_test, y_pred)
+        rmse = np.sqrt(mse)
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
         
-        # Predict next price
-        last_sequence = scaled_data[-window_size:]
-        last_sequence = np.reshape(last_sequence, (1, window_size, 1))
-        next_price_scaled = model.predict(last_sequence)
-        next_price = scaler.inverse_transform(next_price_scaled)[0, 0]
-        
-        return y_test_actual.flatten(), predictions.flatten(), next_price, rmse, mae, mape
-    
-    except Exception as e:
-        st.error(f"Error in model training: {str(e)}")
-        return None, None, None, None, None, None
-
-def calculate_stock_score(df, next_price, current_price, mape):
-    """Calculate stock score"""
-    try:
-        expected_return = ((next_price - current_price) / current_price) * 100
-        
-        # Technical indicators
-        rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
-        
-        # Score components
-        prediction_score = min(max(expected_return * 10, -50), 50)
-        rsi_score = 100 - abs(rsi - 50) * 2
-        accuracy_score = max(100 - mape, 0)
-        
-        total_score = (prediction_score * 0.5 + rsi_score * 0.3 + accuracy_score * 0.2)
-        
-        return {
-            'total_score': total_score,
-            'expected_return': expected_return,
-            'current_price': current_price,
-            'predicted_price': next_price,
-            'rsi': rsi,
-            'accuracy': accuracy_score
+        results[name] = {
+            'model': model,
+            'scaler': scaler,
+            'mse': mse,
+            'rmse': rmse,
+            'mae': mae,
+            'r2': r2,
+            'predictions': y_pred,
+            'actual': y_test
         }
-    except Exception as e:
-        st.error(f"Error calculating stock score: {str(e)}")
-        return None
+    
+    return results
 
-def add_watermark(fig):
-    """Add watermark to plot"""
-    fig.add_annotation(
-        text="Priyanshu Joarder",
-        xref="paper", yref="paper",
-        x=0.98, y=0.02,
-        xanchor='right', yanchor='bottom',
-        showarrow=False,
-        font=dict(size=10, color="rgba(128,128,128,0.5)"),
-        bgcolor="rgba(255,255,255,0.3)",
-        bordercolor="rgba(128,128,128,0.3)",
-        borderwidth=1
-    )
-    return fig
-
-def create_chart(df, ticker):
-    """Create price chart"""
-    fig = go.Figure()
+def predict_future_prices(model, scaler, last_features, days=30):
+    """Predict future stock prices"""
+    predictions = []
+    current_features = last_features.copy()
     
-    fig.add_trace(go.Scatter(
-        x=df.index, 
-        y=df['Close'], 
-        name='Close Price',
-        line=dict(color='blue', width=2)
-    ))
-    
-    if 'MA20' in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df.index, 
-            y=df['MA20'], 
-            name='MA20',
-            line=dict(color='orange', width=1)
-        ))
-    
-    if 'MA50' in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df.index, 
-            y=df['MA50'], 
-            name='MA50',
-            line=dict(color='green', width=1)
-        ))
-    
-    company_name = COMPANY_NAMES.get(ticker, ticker)
-    fig.update_layout(
-        title=f'{company_name} Stock Price',
-        xaxis_title='Date',
-        yaxis_title='Price ($)',
-        height=400
-    )
-    
-    fig = add_watermark(fig)
-    return fig
-
-def create_volume_chart(df, ticker):
-    """Create volume analysis chart"""
-    fig = go.Figure()
-    
-    # Color bars based on price change
-    colors = ['green' if df['Returns'].iloc[i] > 0 else 'red' 
-              for i in range(len(df))]
-    
-    fig.add_trace(go.Bar(
-        x=df.index,
-        y=df['Volume'],
-        name='Volume',
-        marker_color=colors,
-        opacity=0.6
-    ))
-    
-    # Add volume moving average
-    volume_ma = df['Volume'].rolling(window=20).mean()
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=volume_ma,
-        name='Volume MA20',
-        line=dict(color='blue', width=2)
-    ))
-    
-    company_name = COMPANY_NAMES.get(ticker, ticker)
-    fig.update_layout(
-        title=f'{company_name} Volume Analysis',
-        xaxis_title='Date',
-        yaxis_title='Volume',
-        height=400
-    )
-    
-    fig = add_watermark(fig)
-    return fig
-
-def create_rsi_macd_chart(df, ticker):
-    """Create combined RSI and MACD chart"""
-    company_name = COMPANY_NAMES.get(ticker, ticker)
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=['RSI', 'MACD'],
-        vertical_spacing=0.15,
-        row_heights=[0.5, 0.5]
-    )
-    
-    # RSI plot
-    if 'RSI' in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['RSI'],
-            name='RSI',
-            line=dict(color='purple', width=2)
-        ), row=1, col=1)
+    for _ in range(days):
+        # Scale current features
+        current_features_scaled = scaler.transform([current_features])
         
-        # RSI levels
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=1, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=1, col=1)
-        fig.add_hline(y=50, line_dash="dot", line_color="gray", row=1, col=1)
-    
-    # MACD plot
-    if 'MACD' in df.columns and 'MACD_signal' in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['MACD'],
-            name='MACD Line',
-            line=dict(color='blue', width=2)
-        ), row=2, col=1)
+        # Make prediction
+        pred = model.predict(current_features_scaled)[0]
+        predictions.append(pred)
         
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['MACD_signal'],
-            name='Signal Line',
-            line=dict(color='red', width=1)
-        ), row=2, col=1)
-        
-        # MACD histogram
-        macd_histogram = df['MACD'] - df['MACD_signal']
-        colors = ['green' if val > 0 else 'red' for val in macd_histogram]
-        fig.add_trace(go.Bar(
-            x=df.index,
-            y=macd_histogram,
-            name='MACD Histogram',
-            marker_color=colors,
-            opacity=0.5
-        ), row=2, col=1)
+        # Update features for next prediction (simplified approach)
+        # In practice, you'd want a more sophisticated way to update features
+        current_features = np.roll(current_features, 1)
+        current_features[0] = pred
     
-    fig.update_layout(
-        title=f'{company_name} Technical Indicators',
-        height=400,
-        showlegend=True
-    )
-    
-    fig.update_yaxes(title_text="RSI", row=1, col=1, range=[0, 100])
-    fig.update_yaxes(title_text="MACD", row=2, col=1)
-    fig.update_xaxes(title_text="Date", row=2, col=1)
-    
-    fig = add_watermark(fig)
-    return fig
-
-def create_prediction_chart(actual, predicted, ticker):
-    """Create prediction comparison chart"""
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        y=actual, 
-        name='Actual',
-        line=dict(color='blue', width=2)
-    ))
-    
-    fig.add_trace(go.Scatter(
-        y=predicted, 
-        name='Predicted',
-        line=dict(color='red', width=2, dash='dash')
-    ))
-    
-    company_name = COMPANY_NAMES.get(ticker, ticker)
-    fig.update_layout(
-        title=f'{company_name} - Actual vs Predicted',
-        xaxis_title='Time',
-        yaxis_title='Price ($)',
-        height=400
-    )
-    
-    fig = add_watermark(fig)
-    return fig
+    return predictions
 
 def main():
-    st.title("📈 Stock Prediction Dashboard")
-    st.markdown("""
-    <div style='display: flex; justify-content: space-between;'>
-        <strong>LSTM-based Stock Prediction App</strong>
-        <strong>by Priyanshu Joarder</strong>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if not TENSORFLOW_AVAILABLE:
-        st.error("⚠️ TensorFlow is not available. Please check your deployment configuration.")
-        st.stop()
+    st.markdown("<h1 class='main-header'>📈 Stock Price Predictor</h1>", unsafe_allow_html=True)
+    st.markdown("### Predict stock prices using Machine Learning (Python 3.13.5 Compatible)")
     
     # Sidebar
-    with st.sidebar:
-        st.header("Configuration")
-        
-        selected_stocks = st.multiselect(
-            "Select Stocks",
-            options=list(COMPANY_NAMES.keys()),
-            default=['AAPL', 'MSFT'],
-            max_selections=3
-        )
-        
-        start_date = st.date_input("Start Date", value=datetime(2022, 1, 1))
-        end_date = st.date_input("End Date", value=datetime.now())
-        
-        window_size = st.slider("Window Size", 30, 90, 60)
-        epochs = st.slider("Training Epochs", 10, 50, 20)
-        
-        run_analysis = st.button("🚀 Run Analysis", type="primary")
+    st.sidebar.header("Configuration")
     
-    if not selected_stocks:
-        st.warning("Please select at least one stock")
-        return
+    # Stock symbol input
+    symbol = st.sidebar.text_input("Enter Stock Symbol", value="AAPL", help="e.g., AAPL, GOOGL, MSFT").upper()
     
-    if run_analysis:
-        results = {}
-        stock_scores = {}
-        
-        progress_bar = st.progress(0)
-        
-        for i, ticker in enumerate(selected_stocks):
-            company_name = COMPANY_NAMES.get(ticker, ticker)
-            st.text(f"Processing {company_name}...")
+    # Time period
+    period_options = {"1 Year": "1y", "2 Years": "2y", "5 Years": "5y", "10 Years": "10y"}
+    period = st.sidebar.selectbox("Select Time Period", list(period_options.keys()))
+    
+    # Prediction days
+    pred_days = st.sidebar.slider("Days to Predict", 1, 60, 30)
+    
+    if st.sidebar.button("Analyze Stock", type="primary"):
+        with st.spinner(f"Fetching data for {symbol}..."):
+            # Get stock data
+            data = get_stock_data(symbol, period_options[period])
             
-            # Load data
-            df = load_data(ticker, start_date, end_date)
-            if df is None:
-                continue
-            
-            try:
-                # Train model
-                model_result = build_and_train_model(df, window_size, epochs)
-                if model_result[0] is None:
-                    continue
+            if data is not None and not data.empty:
+                st.success(f"Successfully loaded {len(data)} days of data for {symbol}")
                 
-                actual, predicted, next_price, rmse, mae, mape = model_result
-                current_price = df['Close'].iloc[-1]
-                
-                results[ticker] = {
-                    'actual': actual,
-                    'predicted': predicted,
-                    'next_price': next_price,
-                    'current_price': current_price,
-                    'rmse': rmse,
-                    'mae': mae,
-                    'mape': mape,
-                    'df': df
-                }
-                
-                # Calculate score
-                score_result = calculate_stock_score(df, next_price, current_price, mape)
-                if score_result:
-                    stock_scores[ticker] = score_result
-                
-            except Exception as e:
-                st.error(f"Error analyzing {company_name}: {str(e)}")
-                continue
-            
-            progress_bar.progress((i + 1) / len(selected_stocks))
-        
-        if not results:
-            st.error("No stocks analyzed successfully")
-            return
-        
-        # Display results
-        st.header("📊 Analysis Results")
-        
-        # Best stock recommendation
-        if stock_scores:
-            sorted_stocks = sorted(stock_scores.items(), key=lambda x: x[1]['total_score'], reverse=True)
-            
-            best_stock = sorted_stocks[0]
-            best_ticker = best_stock[0]
-            best_company = COMPANY_NAMES.get(best_ticker, best_ticker)
-            
-            st.markdown("## 🏆 TOP RECOMMENDATION")
-            
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                st.markdown(f"""
-                <div style="background: linear-gradient(90deg, #4CAF50, #45a049); 
-                           padding: 20px; border-radius: 10px; color: white;">
-                    <h2 style="margin: 0; color: white;">{best_company}</h2>
-                    <h3 style="margin: 5px 0; color: white;">({best_ticker})</h3>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                st.metric("Overall Score", f"{best_stock[1]['total_score']:.1f}/100")
-                st.metric("Expected Return", f"{best_stock[1]['expected_return']:.2f}%")
-            
-            # Key metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Current Price", f"${best_stock[1]['current_price']:.2f}")
-            with col2:
-                st.metric("Target Price", f"${best_stock[1]['predicted_price']:.2f}")
-            with col3:
-                st.metric("RSI", f"{best_stock[1]['rsi']:.1f}")
-            with col4:
-                st.metric("Model Accuracy", f"{results[best_ticker]['mape']:.1f}% MAPE")
-            
-            st.warning("⚠️ **Disclaimer**: AI-generated recommendation. Always do your own research!")
-            
-            # Comparison table
-            st.subheader("Stock Comparison")
-            comparison_data = []
-            for ticker, score_data in sorted_stocks:
-                company_name = COMPANY_NAMES.get(ticker, ticker)
-                comparison_data.append({
-                    'Company': company_name,
-                    'Score': f"{score_data['total_score']:.1f}",
-                    'Expected Return (%)': f"{score_data['expected_return']:.2f}",
-                    'Current Price ($)': f"{score_data['current_price']:.2f}",
-                    'Target Price ($)': f"{score_data['predicted_price']:.2f}",
-                    'MAPE (%)': f"{results[ticker]['mape']:.2f}"
-                })
-            
-            st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
-        
-        # Individual analysis
-        st.header("Detailed Analysis")
-        
-        for ticker in results:
-            company_name = COMPANY_NAMES.get(ticker, ticker)
-            
-            with st.expander(f"{company_name} Analysis", expanded=False):
-                # Charts
-                col1, col2 = st.columns(2)
+                # Display basic info
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    fig1 = create_chart(results[ticker]['df'], ticker)
-                    st.plotly_chart(fig1, use_container_width=True)
+                    st.metric("Current Price", f"${data['Close'].iloc[-1]:.2f}")
                 
                 with col2:
-                    fig2 = create_prediction_chart(
-                        results[ticker]['actual'], 
-                        results[ticker]['predicted'], 
-                        ticker
-                    )
-                    st.plotly_chart(fig2, use_container_width=True)
-                
-                col3, col4 = st.columns(2)
+                    price_change = data['Close'].iloc[-1] - data['Close'].iloc[-2]
+                    st.metric("Daily Change", f"${price_change:.2f}")
                 
                 with col3:
-                    fig3 = create_volume_chart(results[ticker]['df'], ticker)
-                    st.plotly_chart(fig3, use_container_width=True)
+                    st.metric("Volume", f"{data['Volume'].iloc[-1]:,.0f}")
                 
                 with col4:
-                    fig4 = create_rsi_macd_chart(results[ticker]['df'], ticker)
-                    st.plotly_chart(fig4, use_container_width=True)
+                    volatility = data['Close'].pct_change().std() * np.sqrt(252) * 100
+                    st.metric("Volatility", f"{volatility:.1f}%")
                 
-                # Metrics
-                st.subheader("Model Performance Metrics")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("RMSE", f"{results[ticker]['rmse']:.4f}")
-                with col2:
-                    st.metric("MAE", f"{results[ticker]['mae']:.4f}")
-                with col3:
-                    st.metric("MAPE", f"{results[ticker]['mape']:.2f}%")
+                # Plot stock price
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=data.index,
+                    y=data['Close'],
+                    mode='lines',
+                    name='Close Price',
+                    line=dict(color='#1f77b4', width=2)
+                ))
+                
+                fig.update_layout(
+                    title=f"{symbol} Stock Price History",
+                    xaxis_title="Date",
+                    yaxis_title="Price ($)",
+                    template="plotly_white",
+                    height=500
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Prepare data for ML
+                with st.spinner("Preparing data and training models..."):
+                    try:
+                        # Add technical indicators
+                        data_with_indicators = add_technical_indicators(data.copy())
+                        
+                        # Create features
+                        X, y = create_ml_features(data_with_indicators)
+                        
+                        if len(X) > 50:  # Ensure we have enough data
+                            # Train models
+                            results = train_models(X, y)
+                            
+                            # Display model performance
+                            st.header("Model Performance")
+                            
+                            perf_col1, perf_col2, perf_col3 = st.columns(3)
+                            
+                            for i, (name, result) in enumerate(results.items()):
+                                col = [perf_col1, perf_col2, perf_col3][i]
+                                with col:
+                                    st.markdown(f"**{name}**")
+                                    st.write(f"R² Score: {result['r2']:.3f}")
+                                    st.write(f"RMSE: ${result['rmse']:.2f}")
+                                    st.write(f"MAE: ${result['mae']:.2f}")
+                            
+                            # Select best model
+                            best_model_name = max(results.keys(), key=lambda k: results[k]['r2'])
+                            best_model = results[best_model_name]
+                            
+                            st.success(f"Best performing model: {best_model_name} (R² = {best_model['r2']:.3f})")
+                            
+                            # Make future predictions
+                            st.header("Future Price Predictions")
+                            
+                            # Get last features for prediction
+                            last_features = X.iloc[-1].values
+                            
+                            # Predict future prices
+                            future_predictions = predict_future_prices(
+                                best_model['model'], 
+                                best_model['scaler'], 
+                                last_features, 
+                                pred_days
+                            )
+                            
+                            # Create future dates
+                            last_date = data.index[-1]
+                            future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=pred_days)
+                            
+                            # Plot predictions
+                            fig_pred = go.Figure()
+                            
+                            # Historical data
+                            fig_pred.add_trace(go.Scatter(
+                                x=data.index[-60:],  # Last 60 days
+                                y=data['Close'].iloc[-60:],
+                                mode='lines',
+                                name='Historical',
+                                line=dict(color='#1f77b4', width=2)
+                            ))
+                            
+                            # Predictions
+                            fig_pred.add_trace(go.Scatter(
+                                x=future_dates,
+                                y=future_predictions,
+                                mode='lines+markers',
+                                name='Predictions',
+                                line=dict(color='#ff7f0e', width=2, dash='dash'),
+                                marker=dict(size=6)
+                            ))
+                            
+                            fig_pred.update_layout(
+                                title=f"{symbol} Price Prediction ({pred_days} days)",
+                                xaxis_title="Date",
+                                yaxis_title="Price ($)",
+                                template="plotly_white",
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig_pred, use_container_width=True)
+                            
+                            # Display prediction summary
+                            current_price = data['Close'].iloc[-1]
+                            predicted_price = future_predictions[-1]
+                            price_change_pred = predicted_price - current_price
+                            price_change_pct = (price_change_pred / current_price) * 100
+                            
+                            st.markdown(f"""
+                            <div class="prediction-card">
+                                <h3>Prediction Summary</h3>
+                                <p><strong>Current Price:</strong> ${current_price:.2f}</p>
+                                <p><strong>Predicted Price ({pred_days} days):</strong> ${predicted_price:.2f}</p>
+                                <p><strong>Expected Change:</strong> ${price_change_pred:.2f} ({price_change_pct:+.1f}%)</p>
+                                <p><strong>Model Used:</strong> {best_model_name}</p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # Technical indicators chart
+                            st.header("Technical Analysis")
+                            
+                            fig_tech = make_subplots(
+                                rows=2, cols=2,
+                                subplot_titles=('Moving Averages', 'RSI', 'MACD', 'Volume'),
+                                specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                                       [{"secondary_y": False}, {"secondary_y": False}]]
+                            )
+                            
+                            # Moving averages
+                            recent_data = data_with_indicators.tail(100)
+                            fig_tech.add_trace(go.Scatter(x=recent_data.index, y=recent_data['Close'], name='Close', line=dict(color='blue')), row=1, col=1)
+                            fig_tech.add_trace(go.Scatter(x=recent_data.index, y=recent_data['MA_20'], name='MA 20', line=dict(color='red')), row=1, col=1)
+                            fig_tech.add_trace(go.Scatter(x=recent_data.index, y=recent_data['MA_50'], name='MA 50', line=dict(color='green')), row=1, col=1)
+                            
+                            # RSI
+                            fig_tech.add_trace(go.Scatter(x=recent_data.index, y=recent_data['RSI'], name='RSI', line=dict(color='purple')), row=1, col=2)
+                            fig_tech.add_hline(y=70, line_dash="dash", line_color="red", row=1, col=2)
+                            fig_tech.add_hline(y=30, line_dash="dash", line_color="green", row=1, col=2)
+                            
+                            # MACD
+                            fig_tech.add_trace(go.Scatter(x=recent_data.index, y=recent_data['MACD'], name='MACD', line=dict(color='blue')), row=2, col=1)
+                            fig_tech.add_trace(go.Scatter(x=recent_data.index, y=recent_data['MACD_signal'], name='Signal', line=dict(color='red')), row=2, col=1)
+                            
+                            # Volume
+                            fig_tech.add_trace(go.Bar(x=recent_data.index, y=recent_data['Volume'], name='Volume', marker_color='lightblue'), row=2, col=2)
+                            
+                            fig_tech.update_layout(height=600, showlegend=False, template="plotly_white")
+                            st.plotly_chart(fig_tech, use_container_width=True)
+                            
+                        else:
+                            st.error("Not enough data to train the model. Please try a longer time period.")
+                            
+                    except Exception as e:
+                        st.error(f"Error in model training: {str(e)}")
+                        st.info("This might be due to insufficient data or technical indicator calculation issues.")
+            
+            else:
+                st.error(f"Could not fetch data for {symbol}. Please check the symbol and try again.")
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #666;'>
+        <p>⚠️ <strong>Disclaimer:</strong> This is for educational purposes only. Stock predictions are not guaranteed and should not be used as the sole basis for investment decisions.</p>
+        <p>Built with ❤️ using Streamlit • Compatible with Python 3.13.5</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
+
