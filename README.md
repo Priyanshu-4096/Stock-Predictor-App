@@ -4,13 +4,13 @@ A sophisticated machine learning-based stock price prediction web application bu
 
 ## 🚀 Features
 
-- **Advanced ML Models**: Neural Network (MLP) and Random Forest algorithms for stock price prediction
+- **Advanced ML Models**: Neural Network (MLP) algorithm for stock price prediction
 - **Technical Analysis**: RSI, MACD, Moving Averages, and Volume analysis
 - **Interactive Charts**: Beautiful, responsive charts powered by Plotly
 - **Stock Comparison**: Compare up to 3 stocks side-by-side
 - **Smart Recommendations**: AI-powered stock scoring and recommendations
 - **Real-time Data**: Live stock data from Yahoo Finance
-- **Performance Metrics**: RMSE, MAE, MAPE, and R² score analysis
+- **Performance Metrics**: RMSE, MAE and MAPE score analysis
 
 ## 📊 Supported Stocks
 
@@ -22,8 +22,8 @@ A sophisticated machine learning-based stock price prediction web application bu
 - Meta Platforms Inc. (META)
 - NVIDIA Corporation (NVDA)
 - Netflix Inc. (NFLX)
-- Walt Disney Company (DIS)
-- PayPal Holdings Inc. (PYPL)
+- JPMorgan Chase & Co. (JPM)
+- Adobe Inc. (ADBE)
 
 ## 🛠️ Installation
 
@@ -35,8 +35,8 @@ A sophisticated machine learning-based stock price prediction web application bu
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/stock-prediction-dashboard.git
-   cd stock-prediction-dashboard
+   git clone https://github.com/Priyanshu-4096/Stock-Predictor-App.git
+   cd Stock-Predictor-App
    ```
 
 2. **Create a virtual environment**
@@ -67,8 +67,8 @@ Visit the live application: https://stock-predictor-app-pj.streamlit.app/
 1. **Select Stocks**: Choose up to 3 stocks from the sidebar
 2. **Configure Parameters**: 
    - Set date range for historical data (minimum 1 year required)
-   - Adjust window size for prediction (30-120 days)
-   - Choose between Neural Network or Random Forest model
+   - Adjust window size for prediction (60-200 days)
+   - Choose max training iterations (200-1500)
 3. **Run Analysis**: Click "🚀 Run Analysis" to start prediction
 4. **View Results**: 
    - See top stock recommendation with overall score
@@ -77,7 +77,7 @@ Visit the live application: https://stock-predictor-app-pj.streamlit.app/
 
 ## 📈 Model Architecture
 
-The application offers two powerful machine learning models:
+The application offer powerful machine learning model:
 
 ### Neural Network (MLP)
 - **Architecture**: Multi-layer perceptron with 3 hidden layers (100, 50, 25 neurons)
@@ -85,12 +85,6 @@ The application offers two powerful machine learning models:
 - **Optimizer**: Adam optimizer with adaptive learning rate
 - **Regularization**: L2 regularization (alpha=0.001)
 - **Best for**: Complex pattern recognition in stock data
-
-### Random Forest
-- **Estimators**: 100 decision trees
-- **Max Depth**: 10 levels for optimal performance
-- **Parallel Processing**: Multi-threaded execution
-- **Best for**: Robust predictions with feature importance analysis
 
 ## 📊 Technical Indicators
 
@@ -115,7 +109,6 @@ The model uses advanced feature engineering including:
 - **RMSE**: Root Mean Square Error (lower is better)
 - **MAE**: Mean Absolute Error (average prediction error)
 - **MAPE**: Mean Absolute Percentage Error (percentage-based accuracy)
-- **R² Score**: Coefficient of determination (closer to 1 is better)
 
 ## ⚠️ Disclaimer
 
